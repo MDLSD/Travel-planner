@@ -1,0 +1,271 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <title>Пеший маршрут A → Б</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <!-- Leaflet CSS -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+  <style>
+    html, body { height: 100%; margin: 0; }
+    #app { display: flex; height: 100%; }
+    #sidebar { width: 360px; padding: 16px; border-right: 1px solid #ddd; box-sizing: border-box; overflow: auto; }
+    #map { flex: 1; }
+    label { display:block; margin: 8px 0 4px; font-weight: 600; }
+    input, select, button { width: 100%; padding: 8px; margin-bottom: 8px; box-sizing: border-box; }
+    .metric { margin-top: 8px; color: #333; }
+  </style>
+</head>
+<body>
+<div id="app">
+  <div id="sidebar">
+    <h3>Пеший маршрут A → Б</h3>
+
+    <label>Адрес / координаты (точка A)</label>
+    <input id="addr" placeholder="Адрес или '55.75,37.61'" />
+    <button id="geocode">Найти</button>
+    <div id="a-choices" style="margin-bottom:8px;color:#555;"></div>
+
+    <label>Достопримечательность (точка Б)</label>
+    <select id="poi"></select>
+    <label>Добавить свою достопримечательность</label>
+    <input id="new-name" placeholder="Название (обязательно)" />
+    <div style="display:flex; gap:8px">
+        <input id="new-lat" placeholder="Широта (lat)" style="flex:1" />
+        <input id="new-lon" placeholder="Долгота (lon)" style="flex:1" />
+    </div>
+    <div style="display:flex; gap:8px; margin-bottom:8px">
+        <button id="pick-on-map" type="button" style="flex:1">Выбрать на карте</button>
+        <button id="add-poi" type="button" style="flex:1">Добавить</button>
+    </div>
+
+
+    <button id="build">Построить маршрут</button>
+    <div class="metric" id="metrics"></div>
+  </div>
+  <div id="map"></div>
+</div>
+
+<!-- Leaflet JS -->
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+const API_BASE = ""; // фронт и бэк на одном домене
+
+// Инициализация карты
+const map = L.map('map').setView([59.939, 30.315], 13);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+  { maxZoom: 19, attribution: '&copy; OpenStreetMap' }
+).addTo(map);
+
+
+
+// Состояние
+let aMarker = null, bMarker = null, routeLayer = null;
+let aCoords = null; // [lat, lon]
+let pois = [];
+
+// Элементы
+const addrInput = document.getElementById('addr');
+const geocodeBtn = document.getElementById('geocode');
+const aChoices = document.getElementById('a-choices');
+const poiSelect = document.getElementById('poi');
+const buildBtn = document.getElementById('build');
+const metricsDiv = document.getElementById('metrics');
+const newName = document.getElementById('new-name');
+const newLat  = document.getElementById('new-lat');
+const newLon  = document.getElementById('new-lon');
+const addPoiBtn = document.getElementById('add-poi');
+const pickBtn = document.getElementById('pick-on-map');
+let pickMode = false;
+
+pickBtn.onclick = () => {
+  pickMode = !pickMode;
+  pickBtn.textContent = pickMode ? "Режим: кликните на карту" : "Выбрать на карте";
+  pickBtn.style.background = pickMode ? "#eef" : "";
+};
+
+map.on('click', (e) => {
+  if (!pickMode) return;
+  const { lat, lng } = e.latlng;
+  newLat.value = lat.toFixed(6);
+  newLon.value = lng.toFixed(6);
+  pickMode = false;
+  pickBtn.textContent = "Выбрать на карте";
+  pickBtn.style.background = "";
+});
+
+
+// --- utils ---
+function parseLatLon(text) {
+  const re = /^\s*([+-]?\d+(?:\.\d+)?)\s*,\s*([+-]?\d+(?:\.\d+)?)\s*$/;
+  const m = text.match(re);
+  if (!m) return null;
+  const lat = parseFloat(m[1]), lon = parseFloat(m[2]);
+  if (!isFinite(lat) || !isFinite(lon)) return null;
+  if (lat < -90 || lat > 90 || lon < -180 || lon > 180) return null;
+  return [lat, lon];
+}
+
+function haversineKm(a, b) {
+  const R = 6371.0088;
+  const toRad = d => d * Math.PI / 180;
+  const [lat1, lon1] = a, [lat2, lon2] = b;
+  const dlat = toRad(lat2 - lat1);
+  const dlon = toRad(lon2 - lon1);
+  const s = Math.sin(dlat/2)**2 + Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*Math.sin(dlon/2)**2;
+  return 2 * R * Math.asin(Math.sqrt(s));
+}
+
+// Загрузка POI
+async function loadPOIs() {
+  const res = await fetch(`${API_BASE}/pois`);
+  pois = await res.json();
+  renderPOIs();
+}
+
+function renderPOIs() {
+  poiSelect.innerHTML = "";
+  const list = pois.map(p => {
+    const dist = aCoords ? haversineKm(aCoords, [p.lat, p.lon]) : null;
+    return { ...p, _dist: dist };
+  }).sort((x, y) => {
+    if (aCoords && x._dist != null && y._dist != null) return x._dist - y._dist;
+    return 0;
+  });
+
+  for (const p of list) {
+    const opt = document.createElement('option');
+    opt.value = JSON.stringify([p.lat, p.lon, p.name]);
+    opt.textContent = aCoords && p._dist != null
+      ? `${p.name} — ~${p._dist.toFixed(2)} км`
+      : p.name;
+    poiSelect.appendChild(opt);
+  }
+}
+
+loadPOIs();
+
+addPoiBtn.onclick = async () => {
+  const name = (newName.value || "").trim();
+  const lat = parseFloat((newLat.value || "").replace(",", "."));
+  const lon = parseFloat((newLon.value || "").replace(",", "."));
+  if (!name) { alert("Введите название"); return; }
+  if (!isFinite(lat) || !isFinite(lon)) { alert("Введите корректные координаты"); return; }
+  if (lat < -90 || lat > 90 || lon < -180 || lon > 180) { alert("Координаты вне диапазона"); return; }
+
+  try {
+    const res = await fetch(`${API_BASE}/pois`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, lat, lon, tags: [] })
+    });
+    if (!res.ok) {
+      const txt = await res.text();
+      alert("Ошибка добавления POI: " + txt);
+      return;
+    }
+    // Очистим форму, обновим список и выделим точку на карте
+    newName.value = ""; newLat.value = ""; newLon.value = "";
+    await loadPOIs();
+    // Поставим маркер B и выберем добавленную точку в выпадающем списке
+    const added = await res.json();
+    // Найдём в списке option с таким же именем
+    for (const opt of poiSelect.options) {
+      const [lat, lon, nm] = JSON.parse(opt.value);
+      if (nm === added.name) { poiSelect.value = opt.value; break; }
+    }
+    // Обновим маркер B визуально (без маршрута)
+    if (bMarker) map.removeLayer(bMarker);
+    bMarker = L.marker([added.lat, added.lon], {title: "B"}).addTo(map).bindPopup(`Точка Б: ${added.name}`).openPopup();
+    map.setView([added.lat, added.lon], 15);
+  } catch (e) {
+    alert("Сетевая ошибка при добавлении POI");
+  }
+};
+
+
+// Геокодер / ручные координаты
+geocodeBtn.onclick = async () => {
+  aChoices.textContent = "Ищу...";
+  const manual = parseLatLon(addrInput.value);
+  if (manual) {
+    const [lat, lon] = manual;
+    if (aMarker) map.removeLayer(aMarker);
+    aMarker = L.marker([lat, lon], {title: "A"}).addTo(map).bindPopup("Точка A").openPopup();
+    map.setView([lat, lon], 15);
+    aCoords = [lat, lon];
+    aChoices.textContent = `Выбрано: ${lat.toFixed(5)}, ${lon.toFixed(5)} (ручной ввод)`;
+    renderPOIs();
+    return;
+  }
+
+  const q = addrInput.value.trim();
+  if (!q) { aChoices.textContent = "Введите адрес или координаты"; return; }
+
+  try {
+    const res = await fetch(`${API_BASE}/geocode?q=${encodeURIComponent(q)}`);
+    if (!res.ok) throw new Error(await res.text());
+    const data = await res.json();
+    const items = data.results || [];
+    if (!items.length) { aChoices.textContent = "Ничего не найдено"; return; }
+    aChoices.innerHTML = "";
+    items.forEach((it) => {
+      const btn = document.createElement('button');
+      btn.textContent = it.label || `${it.lat}, ${it.lon}`;
+      btn.style.marginBottom = "6px";
+      btn.onclick = () => {
+        if (aMarker) map.removeLayer(aMarker);
+        aMarker = L.marker([it.lat, it.lon], {title: "A"}).addTo(map).bindPopup("Точка A").openPopup();
+        map.setView([it.lat, it.lon], 15);
+        aCoords = [it.lat, it.lon];
+        aChoices.textContent = `Выбрано: ${btn.textContent}`;
+        renderPOIs();
+      };
+      aChoices.appendChild(btn);
+    });
+  } catch (e) {
+    aChoices.textContent = "Ошибка геокодера";
+  }
+};
+
+// Построение маршрута
+buildBtn.onclick = async () => {
+  metricsDiv.textContent = "Строю маршрут...";
+  if (!aCoords) {
+    const manual = parseLatLon(addrInput.value);
+    if (manual) {
+      aCoords = manual;
+      if (aMarker) map.removeLayer(aMarker);
+      aMarker = L.marker(aCoords, {title: "A"}).addTo(map).bindPopup("Точка A").openPopup();
+    } else {
+      alert("Сначала выбери точку A (через поиск или введи 'lat,lon').");
+      metricsDiv.textContent = "";
+      return;
+    }
+  }
+
+  const [bLat, bLon, bName] = JSON.parse(poiSelect.value);
+  if (bMarker) map.removeLayer(bMarker);
+  bMarker = L.marker([bLat, bLon], {title: "B"}).addTo(map).bindPopup(`Точка Б: ${bName}`).openPopup();
+
+  const from = `${aCoords[0]},${aCoords[1]}`;
+  const to = `${bLat},${bLon}`;
+  const url = `${API_BASE}/route?from_coord=${encodeURIComponent(from)}&to_coord=${encodeURIComponent(to)}&profile=foot-walking`;
+
+  const res = await fetch(url);
+  if (!res.ok) {
+    metricsDiv.textContent = "Ошибка построения маршрута";
+    alert("Ошибка маршрута: " + (await res.text()));
+    return;
+  }
+  const data = await res.json();
+
+  if (routeLayer) map.removeLayer(routeLayer);
+  routeLayer = L.geoJSON(data.geojson, { style: { weight: 6, opacity: 0.9 } }).addTo(map);
+
+  metricsDiv.textContent = `Профиль: ${data.profile}, расстояние: ${data.distance_km} км, ~${data.duration_min} мин`;
+  map.fitBounds(routeLayer.getBounds(), { padding: [20,20] });
+};
+</script>
+</body>
+</html>
