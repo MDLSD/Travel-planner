@@ -11,7 +11,6 @@ import uuid
 from pydantic import BaseModel, Field, field_validator
 
 
-# --- конфиг/ключ ---
 ORS_API_KEY = os.environ.get("ORS_API_KEY")
 if not ORS_API_KEY:
     raise RuntimeError("Не найден ORS_API_KEY в окружении")
@@ -20,7 +19,6 @@ BASE_DIR = Path(__file__).parent
 BASE_GEO = "https://api.openrouteservice.org/geocode"
 BASE_DIRS = "https://api.openrouteservice.org/v2/directions"
 
-# --- приложение ---
 app = FastAPI(title="Travel Planner (ORS)")
 
 
@@ -58,20 +56,17 @@ class PoiIn(BaseModel):
             raise ValueError("lon must be between -180 and 180")
         return v
 
-# если открываешь index.html через этот же бэкенд, CORS можно не включать
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"]
 )
 
-# --- статика и корневая страница ---
 app.mount("/static", StaticFiles(directory=BASE_DIR / "frontend"), name="static")
 
 @app.get("/")
 def root():
     return FileResponse(BASE_DIR / "frontend" / "index.html")
 
-# --- POI из файла ---
 @app.get("/pois")
 def list_pois() -> List[Dict]:
     path = BASE_DIR / "pois.json"
@@ -82,7 +77,6 @@ def list_pois() -> List[Dict]:
 @app.post("/pois", status_code=201)
 def create_poi(poi: PoiIn) -> dict:
     pois = load_pois()
-    # уникальность имени (без учёта регистра)
     names = {p["name"].strip().lower() for p in pois}
     if poi.name.strip().lower() in names:
         raise HTTPException(409, "POI с таким названием уже существует")
@@ -107,7 +101,6 @@ def delete_poi(poi_id: str):
     save_pois(new_pois)
 
 
-# --- геокодер (ORS) ---
 @app.get("/geocode")
 async def geocode(q: str = Query(..., min_length=2)) -> Dict:
     url = f"{BASE_GEO}/search"
@@ -117,7 +110,7 @@ async def geocode(q: str = Query(..., min_length=2)) -> Dict:
         r = await client.get(url, headers=headers, params=params)
     if r.status_code != 200:
         raise HTTPException(r.status_code, f"Geocode error: {r.text}")
-    data = r.json()
+    data = await r.json()
     out = []
     for f in data.get("features", []):
         geom = f.get("geometry", {})
@@ -127,7 +120,6 @@ async def geocode(q: str = Query(..., min_length=2)) -> Dict:
             out.append({"label": props.get("label") or props.get("name"), "lat": lat, "lon": lon})
     return {"results": out}
 
-# --- маршрут (ORS directions, пешком)---
 @app.get("/route")
 async def route(from_coord: str, to_coord: str, profile: str = "foot-walking") -> Dict:
     try:
@@ -151,7 +143,7 @@ async def route(from_coord: str, to_coord: str, profile: str = "foot-walking") -
     if r.status_code != 200:
         raise HTTPException(r.status_code, f"Directions error: {r.text}")
 
-    data = r.json()
+    data = await r.json()
     feat = data.get("features", [])
     if not feat:
         raise HTTPException(502, "Пустой ответ маршрутизатора")
@@ -163,7 +155,6 @@ async def route(from_coord: str, to_coord: str, profile: str = "foot-walking") -
         "profile": profile,
     }
 
-# опционально — чтобы работало `python app.py`
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="127.0.0.1", port=8000, reload=True)
